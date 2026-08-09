@@ -37,6 +37,15 @@ googleProvider.setCustomParameters({
   prompt: 'select_account',
 });
 
+// Check if running inside an embedded iframe (e.g., AI Studio preview)
+export function isInIframe(): boolean {
+  try {
+    return window.self !== window.top;
+  } catch (e) {
+    return true;
+  }
+}
+
 // Helper to check if client is on mobile browser
 export function isMobileBrowser(): boolean {
   return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
@@ -44,28 +53,27 @@ export function isMobileBrowser(): boolean {
   );
 }
 
-// Google Login with automatic mobile redirect fallback
+// Google Login handling
 export async function signInWithGoogle() {
   try {
-    if (isMobileBrowser()) {
-      await signInWithRedirect(auth, googleProvider);
-      return null;
-    }
+    // ALWAYS try popup first. Popups open outside iframe constraints
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
-    console.warn('[Firebase Auth] Popup error, falling back to redirect:', error?.code || error);
-    if (
-      error.code === 'auth/popup-blocked' ||
-      error.code === 'auth/popup-closed-by-user' ||
-      error.code === 'auth/cancelled-popup-request' ||
-      isMobileBrowser()
-    ) {
-      if (error.code !== 'auth/popup-closed-by-user') {
-        await signInWithRedirect(auth, googleProvider);
-      }
+    console.warn('[Firebase Auth] Popup error:', error?.code || error);
+    
+    // If user cancelled, don't fallback to redirect
+    if (error?.code === 'auth/popup-closed-by-user') {
+      throw error;
     }
-    throw error;
+
+    // Only fallback to redirect if NOT in an iframe (redirecting inside an iframe causes Google 403)
+    if (!isInIframe()) {
+      await signInWithRedirect(auth, googleProvider);
+      return null;
+    }
+
+    throw new Error('Google Sign-In popup was blocked or denied by browser. Please allow popups or open the app in a new tab.');
   }
 }
 
