@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "user": {
+      "title": "User Profile",
+      "description": "User account and profile information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "User unique identifier matching auth UID" },
+        "email": { "type": "string", "description": "User email address" },
+        "full_name": { "type": "string", "description": "Display name of the user" },
+        "avatar_url": { "type": "string", "description": "URL of profile photo" },
+        "created_at": { "type": "string", "description": "Creation timestamp ISO string" }
+      },
+      "required": ["id", "email"]
+    },
+    "conversation": {
+      "title": "Conversation",
+      "description": "Chat session thread",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique conversation ID" },
+        "user_id": { "type": "string", "description": "Owner user UID" },
+        "title": { "type": "string", "description": "Thread title", "maxLength": 300 },
+        "created_at": { "type": "string", "description": "Creation timestamp" },
+        "updated_at": { "type": "string", "description": "Last message timestamp" },
+        "model": { "type": "string", "description": "AI model name" }
+      },
+      "required": ["id", "user_id", "title"]
+    },
+    "message": {
+      "title": "Message",
+      "description": "Individual message in a thread",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique message ID" },
+        "conversation_id": { "type": "string", "description": "Parent conversation ID" },
+        "user_id": { "type": "string", "description": "Sender user UID" },
+        "role": { "type": "string", "enum": ["user", "assistant", "system"] },
+        "content": { "type": "string", "description": "Message body text", "maxLength": 50000 },
+        "created_at": { "type": "string", "description": "Timestamp" }
+      },
+      "required": ["id", "conversation_id", "user_id", "role", "content"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/user" },
+      "description": "User profile document"
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/conversation" },
+      "description": "User chat threads"
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/message" },
+      "description": "Chat messages within a thread"
+    }
+  }
+}

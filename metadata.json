@@ -1,0 +1,6 @@
+{
+  "name": "Flow AI",
+  "description": "Production-ready full-stack AI chatbot application featuring Groq API integration, Supabase authentication and database, realtime synchronization, and a dark premium user interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
