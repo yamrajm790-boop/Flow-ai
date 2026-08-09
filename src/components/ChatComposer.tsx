@@ -7,6 +7,7 @@ interface ChatComposerProps {
   isLoading: boolean;
   selectedModel: string;
   onSelectModel: (modelName: string) => void;
+  isKeyboardOpen?: boolean;
 }
 
 const FRIENDLY_MODELS: ModelOption[] = [
@@ -20,6 +21,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   isLoading,
   selectedModel,
   onSelectModel,
+  isKeyboardOpen = false,
 }) => {
   const [input, setInput] = useState('');
   const [isListening, setIsListening] = useState(false);
@@ -28,11 +30,13 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<any>(null);
 
-  // Auto-resize textarea
+  // Auto-resize textarea with strict min-height and max-height bounds
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
+      const scrollH = textareaRef.current.scrollHeight;
+      const targetH = Math.max(44, Math.min(scrollH, 140));
+      textareaRef.current.style.height = `${targetH}px`;
     }
   }, [input]);
 
@@ -41,7 +45,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     onSendMessage(input.trim());
     setInput('');
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = '44px';
     }
   };
 
@@ -92,9 +96,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   };
 
   return (
-    <div className="w-full max-w-3xl mx-auto px-4 sm:px-8 pb-6 pt-2 sticky bottom-0 z-10 bg-gradient-to-t from-[#0D0D0D] via-[#0D0D0D]/90 to-transparent">
+    <div className="w-full max-w-3xl mx-auto px-3 sm:px-8 pb-3 pt-1 shrink-0 bg-gradient-to-t from-[#0D0D0D] via-[#0D0D0D]/95 to-transparent z-10" style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}>
       {/* Container matching Immersive UI rounded dark card style */}
-      <div className="relative bg-[#161616] border border-white/10 rounded-3xl p-3 shadow-2xl transition-all focus-within:border-white/20">
+      <div className="relative bg-[#161616] border border-white/10 rounded-3xl p-2.5 sm:p-3 shadow-2xl transition-all focus-within:border-white/20">
         {/* Text Input Area */}
         <textarea
           ref={textareaRef}
@@ -103,7 +107,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           onKeyDown={handleKeyDown}
           placeholder="How can I help you today?"
           rows={1}
-          className="w-full bg-transparent text-white placeholder-white/20 text-sm sm:text-base px-3 py-1 focus:outline-none focus:ring-0 resize-none leading-relaxed font-sans max-h-40 overflow-y-auto"
+          className="w-full bg-transparent text-white placeholder:text-white/30 text-sm sm:text-base px-3.5 py-2.5 focus:outline-none focus:ring-0 resize-none leading-normal font-sans min-h-[44px] max-h-[140px] overflow-y-auto block"
+          style={{ minHeight: '44px' }}
         />
 
         {/* Bottom Control Bar Inside Composer */}
@@ -215,9 +220,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       </div>
 
       {/* Disclaimer sub-text */}
-      <p className="text-[10px] text-white/20 uppercase tracking-[0.2em] text-center mt-3 font-medium">
-        Flow AI can make mistakes. Verify important information.
-      </p>
+      {!isKeyboardOpen && (
+        <p className="text-[10px] text-white/20 uppercase tracking-[0.2em] text-center mt-2.5 font-medium transition-opacity">
+          Flow AI can make mistakes. Verify important information.
+        </p>
+      )}
     </div>
   );
 };

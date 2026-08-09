@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { FlowLogo } from './FlowLogo';
-import { auth, googleProvider } from '../lib/firebase';
-import { signInWithPopup } from 'firebase/auth';
+import { useAuth } from '../context/AuthContext';
 import { UserProfile } from '../types';
 import { defaultGuestProfile, saveLocalUser } from '../lib/storage';
 import { X, ArrowRight } from 'lucide-react';
@@ -13,32 +12,15 @@ interface AuthModalProps {
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuccess }) => {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { loginWithGoogle, loading, error, user } = useAuth();
 
   if (!isOpen) return null;
 
   const handleGoogleLogin = async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const firebaseUser = result.user;
-      const u: UserProfile = {
-        id: firebaseUser.uid,
-        email: firebaseUser.email || '',
-        full_name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
-        avatar_url: firebaseUser.photoURL || undefined,
-      };
-      saveLocalUser(u);
-      onAuthSuccess(u);
-      setLoading(false);
+    await loginWithGoogle();
+    if (user) {
+      onAuthSuccess(user);
       onClose();
-    } catch (err: any) {
-      console.error('Firebase Google Auth error:', err);
-      setError(err.message || 'Failed to initialize Google Sign-In');
-      setLoading(false);
     }
   };
 

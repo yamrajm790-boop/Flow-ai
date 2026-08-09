@@ -1,6 +1,18 @@
 import { Conversation, Message, UserProfile } from '../types';
+import { getFirebaseIdToken } from './firebase';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const token = await getFirebaseIdToken();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
 
 export async function fetchHealthStatus() {
   try {
@@ -9,7 +21,7 @@ export async function fetchHealthStatus() {
     return await res.json();
   } catch (error) {
     console.warn('Backend server connecting...', error);
-    return { status: 'offline', groqConfigured: false, supabaseConfigured: false };
+    return { status: 'offline', groqConfigured: false, firebaseConfigured: false };
   }
 }
 
@@ -31,11 +43,10 @@ export async function sendChatMessageStream({
   onError: (error: string) => void;
 }) {
   try {
+    const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         conversationId,
         message,
@@ -85,7 +96,6 @@ export async function sendChatMessageStream({
               return;
             }
           } catch {
-            // Raw text chunk if not JSON
             accumulatedText += dataStr;
             onToken(dataStr);
           }
@@ -102,10 +112,11 @@ export async function sendChatMessageStream({
 
 export async function fetchConversations(userId?: string): Promise<Conversation[]> {
   try {
+    const headers = await getAuthHeaders();
     const url = userId 
       ? `${API_BASE_URL}/api/conversations?userId=${encodeURIComponent(userId)}`
       : `${API_BASE_URL}/api/conversations`;
-    const res = await fetch(url);
+    const res = await fetch(url, { headers });
     if (!res.ok) throw new Error('Failed to fetch conversations');
     return await res.json();
   } catch (err) {
@@ -116,9 +127,10 @@ export async function fetchConversations(userId?: string): Promise<Conversation[
 
 export async function createConversation(title?: string, userId?: string): Promise<Conversation> {
   try {
+    const headers = await getAuthHeaders();
     const res = await fetch(`${API_BASE_URL}/api/conversations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ title, userId }),
     });
     if (!res.ok) throw new Error('Failed to create conversation');
@@ -137,7 +149,8 @@ export async function createConversation(title?: string, userId?: string): Promi
 
 export async function fetchMessages(conversationId: string): Promise<Message[]> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages`);
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages`, { headers });
     if (!res.ok) throw new Error('Failed to fetch messages');
     return await res.json();
   } catch (err) {
@@ -148,8 +161,10 @@ export async function fetchMessages(conversationId: string): Promise<Message[]> 
 
 export async function deleteConversationApi(conversationId: string): Promise<boolean> {
   try {
+    const headers = await getAuthHeaders();
     const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
       method: 'DELETE',
+      headers,
     });
     return res.ok;
   } catch (err) {
@@ -160,9 +175,10 @@ export async function deleteConversationApi(conversationId: string): Promise<boo
 
 export async function updateConversationTitleApi(conversationId: string, title: string): Promise<boolean> {
   try {
+    const headers = await getAuthHeaders();
     const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ title }),
     });
     return res.ok;

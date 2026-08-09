@@ -1,0 +1,23 @@
+{
+  "rules": {
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        "profile": {
+          ".validate": "newData.hasChildren(['uid', 'email'])"
+        },
+        "conversations": {
+          "$conversationId": {
+            ".validate": "newData.hasChildren(['id', 'title'])",
+            "messages": {
+              "$messageId": {
+                ".validate": "newData.hasChildren(['id', 'role', 'content'])"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

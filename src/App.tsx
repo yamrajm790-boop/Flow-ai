@@ -7,12 +7,8 @@ import { ChatComposer } from './components/ChatComposer';
 import { AuthModal } from './components/AuthModal';
 import { SettingsModal } from './components/SettingsModal';
 import { UpgradeModal } from './components/UpgradeModal';
-import {
-  UserProfile,
-  Conversation,
-  Message,
-  HealthStatus,
-} from './types';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { Conversation, Message, HealthStatus } from './types';
 import {
   fetchHealthStatus,
   sendChatMessageStream,
@@ -23,8 +19,6 @@ import {
   updateConversationTitleApi,
 } from './lib/api';
 import {
-  getLocalUser,
-  saveLocalUser,
   getLocalConversations,
   saveLocalConversations,
   getLocalMessages,
@@ -32,13 +26,19 @@ import {
   deleteLocalConversation,
   defaultGuestProfile,
 } from './lib/storage';
-import { auth } from './lib/firebase';
-import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
+import {
+  fetchUserConversationsFromRTDB,
+  saveConversationToRTDB,
+  fetchConversationMessagesFromRTDB,
+  saveMessageToRTDB,
+  deleteConversationFromRTDB,
+} from './lib/rtdb';
 import { AudioWaveform } from 'lucide-react';
 
-export default function App() {
+function MainApp() {
+  const { user, firebaseUser, logout, loading: authLoading } = useAuth();
+
   // State
-  const [user, setUser] = useState<UserProfile | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -52,6 +52,36 @@ export default function App() {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
 
+  // Mobile Keyboard & VisualViewport Handling
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) return;
+
+    const handleResize = () => {
+      if (!window.visualViewport) return;
+      const vvHeight = window.visualViewport.height;
+      const windowHeight = window.innerHeight;
+
+      // If visualViewport height is substantially smaller than window height, keyboard is open
+      const keyboardActive = windowHeight - vvHeight > 120;
+      setIsKeyboardOpen(keyboardActive);
+      setViewportHeight(vvHeight);
+    };
+
+    window.visualViewport.addEventListener('resize', handleResize);
+    window.visualViewport.addEventListener('scroll', handleResize);
+    handleResize();
+
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', handleResize);
+        window.visualViewport.removeEventListener('scroll', handleResize);
+      }
+    };
+  }, []);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll messages
@@ -63,31 +93,9 @@ export default function App() {
     scrollToBottom();
   }, [messages, isGenerating]);
 
-  // Initial Load
+  // Initial Load Health Check
   useEffect(() => {
-    // 1. Fetch backend health status
     fetchHealthStatus().then((h) => setHealthStatus(h));
-
-    // 2. Load User Profile with Firebase Auth listener
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      if (firebaseUser) {
-        const u: UserProfile = {
-          id: firebaseUser.uid,
-          email: firebaseUser.email || '',
-          full_name:
-            firebaseUser.displayName ||
-            firebaseUser.email?.split('@')[0] ||
-            'Mithila',
-          avatar_url: firebaseUser.photoURL || undefined,
-        };
-        setUser(u);
-        saveLocalUser(u);
-      } else {
-        setUser(getLocalUser());
-      }
-    });
-
-    return () => unsubscribe();
   }, []);
 
   // Sync Conversations whenever user changes or on mount
@@ -97,8 +105,19 @@ export default function App() {
 
   const loadConversations = async () => {
     const userId = user?.id || 'guest';
-    const remoteConvs = await fetchConversations(userId);
 
+    // First try Realtime Database if user is authenticated with Firebase
+    if (firebaseUser) {
+      const rtdbConvs = await fetchUserConversationsFromRTDB(firebaseUser.uid);
+      if (rtdbConvs && rtdbConvs.length > 0) {
+        setConversations(rtdbConvs);
+        saveLocalConversations(rtdbConvs);
+        return;
+      }
+    }
+
+    // Fallback to API / LocalStorage
+    const remoteConvs = await fetchConversations(userId);
     if (remoteConvs && remoteConvs.length > 0) {
       setConversations(remoteConvs);
       saveLocalConversations(remoteConvs);
@@ -116,6 +135,15 @@ export default function App() {
     }
 
     const loadMsgs = async () => {
+      if (firebaseUser) {
+        const rtdbMsgs = await fetchConversationMessagesFromRTDB(firebaseUser.uid, activeConversationId);
+        if (rtdbMsgs && rtdbMsgs.length > 0) {
+          setMessages(rtdbMsgs);
+          saveLocalMessages(activeConversationId, rtdbMsgs);
+          return;
+        }
+      }
+
       const remoteMsgs = await fetchMessages(activeConversationId);
       if (remoteMsgs && remoteMsgs.length > 0) {
         setMessages(remoteMsgs);
@@ -127,34 +155,7 @@ export default function App() {
     };
 
     loadMsgs();
-
-    // Setup Supabase Realtime Subscription for active conversation messages
-    if (isSupabaseConfigured && activeConversationId) {
-      const channel = supabase
-        .channel(`messages:${activeConversationId}`)
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'messages',
-            filter: `conversation_id=eq.${activeConversationId}`,
-          },
-          (payload) => {
-            const newMsg = payload.new as Message;
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === newMsg.id)) return prev;
-              return [...prev, newMsg];
-            });
-          }
-        )
-        .subscribe();
-
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    }
-  }, [activeConversationId]);
+  }, [activeConversationId, firebaseUser]);
 
   // Start New Chat
   const handleNewChat = async () => {
@@ -166,6 +167,10 @@ export default function App() {
     saveLocalConversations(updatedConvs);
     setActiveConversationId(newConv.id);
     setMessages([]);
+
+    if (firebaseUser) {
+      await saveConversationToRTDB(firebaseUser.uid, newConv);
+    }
   };
 
   // Select Conversation
@@ -186,9 +191,13 @@ export default function App() {
       targetConvId = newConv.id;
       setActiveConversationId(targetConvId);
       setConversations((prev) => [newConv, ...prev]);
+
+      if (firebaseUser) {
+        await saveConversationToRTDB(firebaseUser.uid, newConv);
+      }
     }
 
-    // 1. Add User Message to UI instantly
+    // 1. Add User Message to UI & RTDB
     const userMsg: Message = {
       id: 'usr-' + Date.now(),
       conversation_id: targetConvId,
@@ -200,6 +209,10 @@ export default function App() {
     const updatedMsgs = [...messages, userMsg];
     setMessages(updatedMsgs);
     saveLocalMessages(targetConvId, updatedMsgs);
+
+    if (firebaseUser) {
+      await saveMessageToRTDB(firebaseUser.uid, targetConvId, userMsg);
+    }
 
     // 2. Prepare Placeholder AI Message for streaming
     const aiMsgId = 'ai-' + Date.now();
@@ -228,27 +241,47 @@ export default function App() {
           prev.map((m) => (m.id === aiMsgId ? { ...m, content: streamedContent } : m))
         );
       },
-      onComplete: (fullText, updatedTitle) => {
+      onComplete: async (fullText, updatedTitle) => {
         setIsGenerating(false);
+
+        const finalAiMsg: Message = {
+          id: aiMsgId,
+          conversation_id: targetConvId!,
+          role: 'assistant',
+          content: fullText,
+          created_at: new Date().toISOString(),
+        };
 
         // Update final assistant message
         setMessages((prev) => {
-          const finalMsgs = prev.map((m) =>
-            m.id === aiMsgId ? { ...m, content: fullText } : m
-          );
+          const finalMsgs = prev.map((m) => (m.id === aiMsgId ? finalAiMsg : m));
           saveLocalMessages(targetConvId!, finalMsgs);
           return finalMsgs;
         });
+
+        if (firebaseUser) {
+          await saveMessageToRTDB(firebaseUser.uid, targetConvId!, finalAiMsg);
+        }
 
         // Update conversation title if provided
         if (updatedTitle) {
           setConversations((prev) => {
             const nextConvs = prev.map((c) =>
-              c.id === targetConvId ? { ...c, title: updatedTitle, updated_at: new Date().toISOString() } : c
+              c.id === targetConvId
+                ? { ...c, title: updatedTitle, updated_at: new Date().toISOString() }
+                : c
             );
             saveLocalConversations(nextConvs);
             return nextConvs;
           });
+
+          if (firebaseUser) {
+            await saveConversationToRTDB(firebaseUser.uid, {
+              id: targetConvId!,
+              title: updatedTitle,
+              updated_at: new Date().toISOString(),
+            });
+          }
         }
       },
       onError: (errMessage) => {
@@ -271,7 +304,6 @@ export default function App() {
   const handleRegenerate = () => {
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
     if (lastUserMsg) {
-      // Remove last AI message if present
       const filtered = messages.filter(
         (m, idx) => !(idx === messages.length - 1 && m.role === 'assistant')
       );
@@ -284,6 +316,10 @@ export default function App() {
   const handleDeleteConversation = async (id: string) => {
     await deleteConversationApi(id);
     deleteLocalConversation(id);
+
+    if (firebaseUser) {
+      await deleteConversationFromRTDB(firebaseUser.uid, id);
+    }
 
     const updated = conversations.filter((c) => c.id !== id);
     setConversations(updated);
@@ -302,11 +338,24 @@ export default function App() {
       saveLocalConversations(nextConvs);
       return nextConvs;
     });
+
+    if (firebaseUser) {
+      await saveConversationToRTDB(firebaseUser.uid, {
+        id,
+        title: newTitle,
+        updated_at: new Date().toISOString(),
+      });
+    }
   };
 
   // Clear All Conversations
   const handleClearAllConversations = () => {
-    conversations.forEach((c) => deleteLocalConversation(c.id));
+    conversations.forEach((c) => {
+      deleteLocalConversation(c.id);
+      if (firebaseUser) {
+        deleteConversationFromRTDB(firebaseUser.uid, c.id);
+      }
+    });
     setConversations([]);
     setActiveConversationId(null);
     setMessages([]);
@@ -314,21 +363,29 @@ export default function App() {
 
   // Logout
   const handleLogout = async () => {
-    try {
-      await firebaseSignOut(auth);
-    } catch (e) {
-      console.warn('Firebase logout error:', e);
-    }
-    setUser(defaultGuestProfile);
-    saveLocalUser(defaultGuestProfile);
+    await logout();
     setActiveConversationId(null);
     setMessages([]);
   };
 
-  const activeConv = conversations.find((c) => c.id === activeConversationId);
+  if (authLoading) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[#0D0D0D] text-white">
+        <div className="flex flex-col items-center gap-3">
+          <AudioWaveform className="w-8 h-8 text-white animate-spin" />
+          <span className="text-sm font-medium text-neutral-400">Loading Flow AI Workspace...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0D0D0D] text-[#E5E5E5] font-sans antialiased selection:bg-white/20">
+    <div
+      className="flex w-screen overflow-hidden bg-[#0D0D0D] text-[#E5E5E5] font-sans antialiased selection:bg-white/20"
+      style={{
+        height: viewportHeight ? `${viewportHeight}px` : '100dvh',
+      }}
+    >
       {/* Sidebar Navigation */}
       <Sidebar
         isOpen={isSidebarOpen}
@@ -346,7 +403,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+      <div className="flex-1 flex flex-col h-full overflow-hidden relative min-h-0">
         {/* Top Header */}
         <Header
           user={user}
@@ -356,27 +413,30 @@ export default function App() {
         />
 
         {/* Chat Area Body */}
-        <main className="flex-1 overflow-y-auto px-2 sm:px-6 py-4 flex flex-col justify-between">
+        <main className="flex-1 overflow-y-auto px-2 sm:px-6 py-2 flex flex-col min-h-0">
           {!activeConversationId || messages.length === 0 ? (
-            <EmptyChatState user={user} onSelectPrompt={handleSendMessage} />
+            <EmptyChatState user={user} onSelectPrompt={handleSendMessage} isKeyboardOpen={isKeyboardOpen} />
           ) : (
-            <div className="w-full max-w-3xl mx-auto space-y-4 pb-12">
-              {messages.map((msg, idx) => {
-                const isLastAi =
-                  msg.role === 'assistant' &&
-                  idx === messages.findLastIndex((m) => m.role === 'assistant');
-
-                return (
+            <div className="w-full max-w-3xl mx-auto space-y-4 pb-6 my-auto">
+              {(() => {
+                let lastAiIdx = -1;
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  if (messages[i].role === 'assistant') {
+                    lastAiIdx = i;
+                    break;
+                  }
+                }
+                return messages.map((msg, idx) => (
                   <ChatMessage
                     key={msg.id}
                     message={msg}
-                    isLastAiMessage={isLastAi}
+                    isLastAiMessage={idx === lastAiIdx}
                     onRegenerate={handleRegenerate}
                   />
-                );
-              })}
+                ));
+              })()}
 
-              {/* Streaming Loading Pulse Indicator */}
+              {/* Streaming Loading Indicator */}
               {isGenerating && (
                 <div className="flex items-center gap-2 text-neutral-400 text-xs py-2 px-4 animate-pulse">
                   <AudioWaveform className="w-4 h-4 text-purple-400 animate-spin" />
@@ -395,6 +455,7 @@ export default function App() {
           isLoading={isGenerating}
           selectedModel={selectedModel}
           onSelectModel={setSelectedModel}
+          isKeyboardOpen={isKeyboardOpen}
         />
       </div>
 
@@ -402,7 +463,7 @@ export default function App() {
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
-        onAuthSuccess={(u) => setUser(u)}
+        onAuthSuccess={() => setIsAuthModalOpen(false)}
       />
 
       <SettingsModal
@@ -411,13 +472,7 @@ export default function App() {
         user={user}
         health={healthStatus}
         onClearAllConversations={handleClearAllConversations}
-        onUpdateProfile={(updated) => {
-          if (user) {
-            const newU = { ...user, ...updated };
-            setUser(newU);
-            saveLocalUser(newU);
-          }
-        }}
+        onUpdateProfile={() => {}}
       />
 
       <UpgradeModal
@@ -425,5 +480,13 @@ export default function App() {
         onClose={() => setIsUpgradeModalOpen(false)}
       />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <MainApp />
+    </AuthProvider>
   );
 }

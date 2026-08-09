@@ -5,12 +5,96 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 import dotenv from 'dotenv';
 import Groq from 'groq-sdk';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+// Initialize Firebase Admin SDK
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID || 'gen-lang-client-0076726116';
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY
+  ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+  : undefined;
+
+if (firebaseClientEmail && firebasePrivateKey) {
+  try {
+    if (getApps().length === 0) {
+      initializeApp({
+        credential: cert({
+          projectId: firebaseProjectId,
+          clientEmail: firebaseClientEmail,
+          privateKey: firebasePrivateKey,
+        }),
+      });
+      console.log('[Flow AI Backend] Firebase Admin SDK initialized with Service Account.');
+    }
+  } catch (err) {
+    console.warn('[Flow AI Backend] Firebase Admin Cert init warning:', err);
+  }
+} else {
+  try {
+    if (getApps().length === 0) {
+      initializeApp({
+        projectId: firebaseProjectId,
+      });
+      console.log(`[Flow AI Backend] Firebase Admin SDK initialized for Project ID: ${firebaseProjectId}`);
+    }
+  } catch (err) {
+    console.warn('[Flow AI Backend] Firebase Admin Project ID init warning:', err);
+  }
+}
+
+// Custom Authenticated Request interface
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    uid: string;
+    email?: string;
+    name?: string;
+    picture?: string;
+  };
+}
+
+// Authentication Middleware to verify Firebase ID Token
+async function authenticateFirebaseUser(req: AuthenticatedRequest, res: Response, next: Function) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    // Fallback to query/body UID for preview or guest mode
+    const fallbackUid = (req.query.userId as string) || (req.body?.userId as string) || 'guest';
+    req.user = { uid: fallbackUid };
+    return next();
+  }
+
+  const token = authHeader.split('Bearer ')[1]?.trim();
+  if (!token) {
+    req.user = { uid: 'guest' };
+    return next();
+  }
+
+  try {
+    if (getApps().length > 0) {
+      const decodedToken = await getAuth().verifyIdToken(token);
+      req.user = {
+        uid: decodedToken.uid,
+        email: decodedToken.email,
+        name: decodedToken.name,
+        picture: decodedToken.picture,
+      };
+      console.log(`[Flow AI Auth] Token verified for UID: ${decodedToken.uid}`);
+    } else {
+      req.user = { uid: 'guest' };
+    }
+    next();
+  } catch (err: any) {
+    console.warn('[Flow AI Auth] Token verification error:', err.message);
+    return res.status(401).json({ message: 'Unauthorized: Invalid or expired authentication token' });
+  }
+}
 
 // Initialize Groq SDK if GROQ_API_KEY exists
 const groqApiKey = process.env.GROQ_API_KEY || '';
@@ -89,15 +173,15 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
     groqConfigured: Boolean(groqClient),
-    supabaseConfigured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
+    firebaseConfigured: Boolean(getApps().length > 0),
     model: 'Flow AI', // Friendly label, NEVER expose internal model ID
     timestamp: new Date().toISOString(),
   });
 });
 
 // 2. Get Conversations
-app.get('/api/conversations', (req: Request, res: Response) => {
-  const userId = (req.query.userId as string) || 'guest';
+app.get('/api/conversations', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.uid || (req.query.userId as string) || 'guest';
   const userConvs = Array.from(mockConversations.values())
     .filter((c) => c.user_id === userId)
     .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
@@ -106,8 +190,9 @@ app.get('/api/conversations', (req: Request, res: Response) => {
 });
 
 // 3. Create Conversation
-app.post('/api/conversations', (req: Request, res: Response) => {
-  const { title, userId = 'guest' } = req.body;
+app.post('/api/conversations', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.uid || req.body.userId || 'guest';
+  const { title } = req.body;
   const newConv: DbConversation = {
     id: 'conv-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7),
     user_id: userId,
@@ -123,14 +208,14 @@ app.post('/api/conversations', (req: Request, res: Response) => {
 });
 
 // 4. Get Conversation Messages
-app.get('/api/conversations/:id/messages', (req: Request, res: Response) => {
+app.get('/api/conversations/:id/messages', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
   const conversationId = req.params.id;
   const msgs = mockMessages.get(conversationId) || [];
   res.json(msgs);
 });
 
 // 5. Update Conversation Title
-app.patch('/api/conversations/:id', (req: Request, res: Response) => {
+app.patch('/api/conversations/:id', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
   const conversationId = req.params.id;
   const { title } = req.body;
 
@@ -147,7 +232,7 @@ app.patch('/api/conversations/:id', (req: Request, res: Response) => {
 });
 
 // 6. Delete Conversation
-app.delete('/api/conversations/:id', (req: Request, res: Response) => {
+app.delete('/api/conversations/:id', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
   const conversationId = req.params.id;
   mockConversations.delete(conversationId);
   mockMessages.delete(conversationId);
@@ -155,8 +240,9 @@ app.delete('/api/conversations/:id', (req: Request, res: Response) => {
 });
 
 // 7. Main Chat Completion Endpoint (SSE Streaming)
-app.post('/api/chat', chatLimiter, async (req: Request, res: Response) => {
-  const { conversationId, message, userId = 'guest' } = req.body;
+app.post('/api/chat', chatLimiter, authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.uid || req.body.userId || 'guest';
+  const { conversationId, message } = req.body;
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ message: 'Message content is required' });
