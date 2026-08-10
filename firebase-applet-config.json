@@ -6,6 +6,7 @@
   "firestoreDatabaseId": "ai-studio-flowai-a3300c91-c403-4c3c-a631-e2e6f8411271",
   "storageBucket": "gen-lang-client-0076726116.firebasestorage.app",
   "messagingSenderId": "132244538729",
+  "databaseURL": "https://gen-lang-client-0076726116-default-rtdb.firebaseio.com",
   "measurementId": "",
   "oAuthClientId": "132244538729-q32v3c80n5eq53v996iec39c7ok1od2h.apps.googleusercontent.com",
   "recaptchaSiteKey": ""

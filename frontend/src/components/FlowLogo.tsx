@@ -9,17 +9,17 @@ interface FlowLogoProps {
 export const FlowLogo: React.FC<FlowLogoProps> = ({
   className = 'w-8 h-8',
   size,
-  variant = 'transparent',
 }) => {
   const style = size ? { width: size, height: size } : undefined;
-  const logoSrc = variant === 'square' ? '/flow-logo-square.png' : '/flow-logo-transparent.png';
+  const logoSrc = 'https://i.ibb.co/QjFk1LzP/f20a48b70d0a3be29d3a62cb04d70909.jpg';
 
   return (
-    <div className={`relative inline-flex items-center justify-center shrink-0 ${className}`} style={style}>
+    <div className={`relative inline-flex items-center justify-center shrink-0 border-none outline-none ${className}`} style={style}>
       <img
         src={logoSrc}
         alt="Flow AI Logo"
-        className="w-full h-full object-contain pointer-events-none select-none"
+        className="w-full h-full object-contain pointer-events-none select-none border-none outline-none shadow-none mix-blend-screen"
+        referrerPolicy="no-referrer"
       />
     </div>
   );
@@ -36,4 +36,5 @@ export const FlowLogoText: React.FC<{ className?: string; logoSize?: string }> =
     </div>
   );
 };
+
 

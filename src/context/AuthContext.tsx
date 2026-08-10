@@ -77,17 +77,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         clearTimeout(timeoutId);
         if (!isMounted) return;
 
+        if (import.meta.env.DEV) {
+          console.log('Auth state changed');
+        }
+
         setFirebaseUser(fbUser);
 
         if (fbUser) {
-          // Token verification test without logging actual token
+          if (import.meta.env.DEV) {
+            console.log('Firebase UID available');
+          }
+
+          // Verify token retrieval for backend communication
           try {
             const token = await fbUser.getIdToken();
-            if (token) {
-              console.log('Firebase authentication successful');
+            if (token && import.meta.env.DEV) {
+              console.log('Backend token verification successful');
             }
           } catch (tokErr) {
-            console.warn('[Auth] Token retrieval warning:', tokErr);
+            if (import.meta.env.DEV) {
+              console.warn('[Auth] Token retrieval notice:', tokErr);
+            }
+          }
+
+          if (import.meta.env.DEV) {
+            console.log('Profile synchronization started');
           }
 
           try {
@@ -102,7 +116,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               saveLocalUser(syncedProfile);
             }
           } catch (syncErr) {
-            console.warn('[Auth] Profile sync error, using fallback:', syncErr);
+            if (import.meta.env.DEV) {
+              console.warn('[Auth] Profile sync error, using fallback:', syncErr);
+            }
             const fallbackProfile: UserProfile = {
               id: fbUser.uid,
               email: fbUser.email || '',
@@ -114,14 +130,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               saveLocalUser(fallbackProfile);
             }
           } finally {
+            if (import.meta.env.DEV) {
+              console.log('Profile synchronization completed');
+            }
             if (isMounted) {
               setLoading(false);
             }
           }
         } else {
           if (isMounted) {
-            const cachedUser = getLocalUser() || defaultGuestProfile;
-            setUser(cachedUser);
+            const cachedUser = getLocalUser();
+            // If cached user is guest, preserve guest session; otherwise unauthenticated user = null
+            if (cachedUser && cachedUser.id === 'guest') {
+              setUser(cachedUser);
+            } else {
+              setUser(null);
+            }
             setLoading(false);
           }
         }
@@ -130,8 +154,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.error('[Auth] onAuthStateChanged error:', authErr);
         clearTimeout(timeoutId);
         if (isMounted) {
-          setUser(defaultGuestProfile);
-          setError('Authentication service error. Continuing as Guest.');
+          setUser(null);
+          setError('Unable to verify your session. Please check your connection.');
           setLoading(false);
         }
       }
@@ -168,9 +192,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoading(true);
     try {
       await logoutUser();
-      setUser(defaultGuestProfile);
+      setUser(null);
       setFirebaseUser(null);
-      saveLocalUser(defaultGuestProfile);
+      localStorage.removeItem('flow_ai_user');
     } catch (err) {
       console.error('[Auth] Logout error:', err);
     } finally {

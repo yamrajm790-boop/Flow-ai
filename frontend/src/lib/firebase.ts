@@ -37,6 +37,11 @@ googleProvider.setCustomParameters({
   prompt: 'select_account',
 });
 
+if (import.meta.env.DEV) {
+  console.log('Firebase initialized');
+  console.log('Google provider initialized');
+}
+
 // Check if running inside an embedded iframe (e.g., AI Studio preview)
 export function isInIframe(): boolean {
   try {
@@ -54,49 +59,71 @@ export function isMobileBrowser(): boolean {
 }
 
 // Google Login handling
-export async function signInWithGoogle() {
+export async function signInWithGoogle(): Promise<User | null> {
+  if (import.meta.env.DEV) {
+    console.log('Google sign-in started');
+  }
+
   try {
-    // ALWAYS try popup first. Popups open outside iframe constraints
+    // ALWAYS try popup first.
     const result = await signInWithPopup(auth, googleProvider);
+    if (import.meta.env.DEV) {
+      console.log('Google sign-in successful');
+      if (result?.user?.uid) {
+        console.log('Firebase UID available');
+      }
+    }
     return result.user;
   } catch (error: any) {
-    console.warn('[Firebase Auth] Popup error:', error?.code || error);
+    if (import.meta.env.DEV) {
+      console.warn('[Firebase Auth] Popup error:', error?.code || error);
+    }
     
-    // If user cancelled, don't fallback to redirect
-    if (error?.code === 'auth/popup-closed-by-user') {
+    // If user explicitly cancelled or closed popup, rethrow error
+    if (
+      error?.code === 'auth/popup-closed-by-user' ||
+      error?.code === 'auth/cancelled-popup-request'
+    ) {
       throw error;
     }
 
-    // Only fallback to redirect if NOT in an iframe (redirecting inside an iframe causes Google 403)
-    if (!isInIframe()) {
+    // Mobile / popup-blocked fallback to redirect IF not running in an embedded iframe
+    if (
+      (error?.code === 'auth/popup-blocked' ||
+        error?.code === 'auth/operation-not-supported-in-this-environment' ||
+        isMobileBrowser()) &&
+      !isInIframe()
+    ) {
+      if (import.meta.env.DEV) {
+        console.log('[Firebase Auth] Falling back to signInWithRedirect');
+      }
       await signInWithRedirect(auth, googleProvider);
       return null;
     }
 
-    throw new Error('Google Sign-In popup was blocked or denied by browser. Please allow popups or open the app in a new tab.');
+    throw error;
   }
 }
 
-// Check redirect result on application boot
+// Check redirect result on application boot (only once)
+let redirectChecked = false;
+
 export async function checkRedirectAuthResult(): Promise<User | null> {
-  // If running inside an embedded iframe (e.g., AI Studio preview), redirect auth is not used
-  // and getRedirectResult causes IndexedDB closure errors ("Database is closing/hidden").
-  if (isInIframe()) {
+  if (redirectChecked || isInIframe()) {
     return null;
   }
+  redirectChecked = true;
+
   try {
     const result = await getRedirectResult(auth);
+    if (result?.user && import.meta.env.DEV) {
+      console.log('Google sign-in successful (from redirect)');
+      console.log('Firebase UID available');
+    }
     return result?.user || null;
   } catch (error: any) {
-    const msg = error?.message || String(error);
-    if (
-      msg.includes('closing') ||
-      msg.includes('hidden') ||
-      error?.code === 'auth/web-storage-unsupported'
-    ) {
-      console.warn('[Firebase Auth] Redirect check bypassed (storage state):', msg);
-    } else {
-      console.warn('[Firebase Auth] Redirect result notice:', error);
+    if (import.meta.env.DEV) {
+      console.warn('[Firebase Auth] Redirect result notice:', error?.message || error);
     }
     return null;
   }
@@ -112,7 +139,7 @@ export async function getFirebaseIdToken(): Promise<string | null> {
   const currentUser = auth.currentUser;
   if (!currentUser) return null;
   try {
-    return await currentUser.getIdToken(true);
+    return await currentUser.getIdToken();
   } catch (err) {
     console.error('[Firebase Auth] Failed to retrieve ID token:', err);
     return null;
@@ -125,17 +152,20 @@ export function formatAuthErrorMessage(error: any): string {
   const code = error.code || '';
   switch (code) {
     case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
       return 'Google sign-in was cancelled.';
     case 'auth/popup-blocked':
       return 'Sign-in popup was blocked. Please allow popups or try again.';
     case 'auth/network-request-failed':
-      return 'Network error. Please check your connection.';
+      return 'Network error. Please check your internet connection.';
     case 'auth/unauthorized-domain':
-      return 'Domain not authorized in Firebase Console.';
+      return 'This domain is not authorized in Firebase Console. Please add localhost and your Vercel domain to Firebase Auth -> Settings -> Authorized Domains.';
     case 'auth/account-exists-with-different-credential':
-      return 'An account already exists with this email address.';
+      return 'An account already exists with this email address using a different sign-in method.';
+    case 'auth/operation-not-allowed':
+      return 'Google sign-in is not enabled in Firebase Console. Please enable Google provider in Firebase Console -> Authentication -> Sign-in method.';
     default:
-      return error.message || 'Failed to sign in with Google. Please try again.';
+      return typeof error === 'string' ? error : (error.message || 'Failed to sign in with Google. Please try again.');
   }
 }
 
