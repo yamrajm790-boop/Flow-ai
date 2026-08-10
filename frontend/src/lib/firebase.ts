@@ -6,6 +6,8 @@ import {
   signInWithRedirect,
   getRedirectResult,
   signOut as firebaseSignOut,
+  setPersistence,
+  browserLocalPersistence,
   User,
 } from 'firebase/auth';
 import { getDatabase } from 'firebase/database';
@@ -30,6 +32,11 @@ const firebaseConfig = {
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
+// Ensure browser local persistence is set
+setPersistence(auth, browserLocalPersistence).catch((err) => {
+  console.warn('[Firebase Auth] Could not set local persistence:', err);
+});
+
 export const database = getDatabase(app);
 
 export const googleProvider = new GoogleAuthProvider();
@@ -58,6 +65,14 @@ export function isMobileBrowser(): boolean {
   );
 }
 
+export function isRedirectInProgress(): boolean {
+  try {
+    return sessionStorage.getItem('flow_ai_redirect_in_progress') === 'true';
+  } catch (e) {
+    return false;
+  }
+}
+
 // Google Login handling
 export async function signInWithGoogle(): Promise<User | null> {
   if (import.meta.env.DEV) {
@@ -65,7 +80,7 @@ export async function signInWithGoogle(): Promise<User | null> {
   }
 
   try {
-    // ALWAYS try popup first.
+    // Try popup first
     const result = await signInWithPopup(auth, googleProvider);
     if (import.meta.env.DEV) {
       console.log('Google sign-in successful');
@@ -78,7 +93,7 @@ export async function signInWithGoogle(): Promise<User | null> {
     if (import.meta.env.DEV) {
       console.warn('[Firebase Auth] Popup error:', error?.code || error);
     }
-    
+
     // If user explicitly cancelled or closed popup, rethrow error
     if (
       error?.code === 'auth/popup-closed-by-user' ||
@@ -97,6 +112,9 @@ export async function signInWithGoogle(): Promise<User | null> {
       if (import.meta.env.DEV) {
         console.log('[Firebase Auth] Falling back to signInWithRedirect');
       }
+      try {
+        sessionStorage.setItem('flow_ai_redirect_in_progress', 'true');
+      } catch (e) {}
       await signInWithRedirect(auth, googleProvider);
       return null;
     }
@@ -110,18 +128,32 @@ let redirectChecked = false;
 
 export async function checkRedirectAuthResult(): Promise<User | null> {
   if (redirectChecked || isInIframe()) {
+    try {
+      sessionStorage.removeItem('flow_ai_redirect_in_progress');
+    } catch (e) {}
     return null;
   }
   redirectChecked = true;
 
   try {
-    const result = await getRedirectResult(auth);
+    // 6-second timeout for getRedirectResult so it never hangs indefinitely
+    const redirectPromise = getRedirectResult(auth);
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000));
+    const result = await Promise.race([redirectPromise, timeoutPromise]);
+
+    try {
+      sessionStorage.removeItem('flow_ai_redirect_in_progress');
+    } catch (e) {}
+
     if (result?.user && import.meta.env.DEV) {
       console.log('Google sign-in successful (from redirect)');
       console.log('Firebase UID available');
     }
     return result?.user || null;
   } catch (error: any) {
+    try {
+      sessionStorage.removeItem('flow_ai_redirect_in_progress');
+    } catch (e) {}
     if (import.meta.env.DEV) {
       console.warn('[Firebase Auth] Redirect result notice:', error?.message || error);
     }
@@ -159,7 +191,7 @@ export function formatAuthErrorMessage(error: any): string {
     case 'auth/network-request-failed':
       return 'Network error. Please check your internet connection.';
     case 'auth/unauthorized-domain':
-      return 'This domain is not authorized in Firebase Console. Please add localhost and your Vercel domain to Firebase Auth -> Settings -> Authorized Domains.';
+      return 'This domain is not authorized in Firebase Console. Please add flowaii.duckdns.org to Firebase Auth -> Settings -> Authorized Domains.';
     case 'auth/account-exists-with-different-credential':
       return 'An account already exists with this email address using a different sign-in method.';
     case 'auth/operation-not-allowed':

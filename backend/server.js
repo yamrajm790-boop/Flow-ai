@@ -245,13 +245,45 @@ if (groqApiKey && !groqApiKey.includes('xxxxxxxx')) {
 // ============================================================================
 app.use(helmet());
 
-const frontendUrl = process.env.FRONTEND_URL || '*';
+const allowedOrigins = [
+  'https://flowaii.duckdns.org',
+  'http://localhost:3000',
+  'http://localhost:5173',
+];
+
+if (process.env.FRONTEND_URL && process.env.FRONTEND_URL !== '*') {
+  const envOrigins = process.env.FRONTEND_URL.split(',').map((u) => u.trim().replace(/\/+$/, ''));
+  envOrigins.forEach((o) => {
+    if (o && !allowedOrigins.includes(o)) {
+      allowedOrigins.push(o);
+    }
+  });
+}
+
 app.use(
   cors({
-    origin: frontendUrl === '*' ? '*' : [frontendUrl, 'http://localhost:5173', 'http://localhost:3000'],
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+
+      const cleanOrigin = origin.replace(/\/+$/, '');
+      if (allowedOrigins.includes(cleanOrigin) || process.env.FRONTEND_URL === '*') {
+        return callback(null, true);
+      }
+
+      if (cleanOrigin.endsWith('.duckdns.org') || cleanOrigin.endsWith('.vercel.app')) {
+        return callback(null, true);
+      }
+
+      return callback(null, true);
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Token', 'Accept'],
+    optionsSuccessStatus: 200,
   })
 );
+
+app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -393,6 +425,10 @@ app.post('/api/chat', chatLimiter, authenticateFirebaseUser, async (req, res) =>
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
 
   if (updatedTitle) {
     res.write(`data: ${JSON.stringify({ title: updatedTitle })}\n\n`);

@@ -603,11 +603,30 @@ export default function App() {
   const [currentPath, setCurrentPath] = useState(() => window.location.pathname);
 
   useEffect(() => {
-    const handlePopState = () => {
+    const handleLocationChange = () => {
       setCurrentPath(window.location.pathname);
     };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+
+    window.addEventListener('popstate', handleLocationChange);
+
+    const origPushState = window.history.pushState;
+    const origReplaceState = window.history.replaceState;
+
+    window.history.pushState = function (...args) {
+      origPushState.apply(this, args);
+      handleLocationChange();
+    };
+
+    window.history.replaceState = function (...args) {
+      origReplaceState.apply(this, args);
+      handleLocationChange();
+    };
+
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.history.pushState = origPushState;
+      window.history.replaceState = origReplaceState;
+    };
   }, []);
 
   if (currentPath === '/admin' || currentPath.startsWith('/admin/')) {
@@ -615,7 +634,6 @@ export default function App() {
       <AdminPanel
         onReturnToApp={() => {
           window.history.pushState({}, '', '/');
-          setCurrentPath('/');
         }}
       />
     );

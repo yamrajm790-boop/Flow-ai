@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { User, onAuthStateChanged } from 'firebase/auth';
 import {
   auth,
@@ -7,6 +7,7 @@ import {
   logoutUser,
   getFirebaseIdToken,
   formatAuthErrorMessage,
+  isRedirectInProgress,
 } from '../lib/firebase';
 import { syncUserProfileToRTDB } from '../lib/rtdb';
 import { UserProfile } from '../types';
@@ -42,128 +43,129 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  const isLoggingInRef = useRef<boolean>(false);
+
   const initAuth = useCallback(() => {
     setLoading(true);
     setError(null);
 
     let isMounted = true;
+    let timeoutId: NodeJS.Timeout | null = null;
 
-    // 10-second timeout: ensure loading state never hangs indefinitely
-    const timeoutId = setTimeout(() => {
+    // Safety timeout (15 seconds): ensure app never hangs on "Loading Flow AI Workspace..."
+    timeoutId = setTimeout(() => {
       if (isMounted) {
-        console.warn('[Auth] Initialization 10-second timeout triggered.');
-        const cachedUser = getLocalUser() || defaultGuestProfile;
-        setUser(cachedUser);
-        setError('Authentication request timed out. Please check your connection and retry.');
-        setLoading(false);
-      }
-    }, 10000);
+        console.warn('[Auth] Initialization safety timeout reached.');
+        const isUserOAuthAction = isLoggingInRef.current || isRedirectInProgress();
+        const cachedUser = getLocalUser();
 
-    // 1. Check for mobile redirect auth result on startup
+        if (isUserOAuthAction) {
+          setError('Authentication request timed out. Please check your connection and retry.');
+        } else {
+          // If simply opening app, fall back to guest/cached user without showing error banner
+          if (cachedUser) {
+            setUser(cachedUser);
+          } else {
+            setUser(defaultGuestProfile);
+          }
+        }
+        setLoading(false);
+        isLoggingInRef.current = false;
+      }
+    }, 15000);
+
+    // 1. Check redirect result first (if coming back from OAuth redirect)
     checkRedirectAuthResult()
       .then((redirectUser) => {
-        if (redirectUser) {
+        if (redirectUser && isMounted) {
           console.log('[Auth] Redirect sign-in success for:', redirectUser.email);
         }
       })
       .catch((err) => {
-        console.warn('[Auth] Redirect check error:', err);
+        console.warn('[Auth] Redirect check notice:', err);
       });
 
-    // 2. Main Firebase Auth State Listener (Source of Truth)
+    // 2. Main Firebase Auth State Listener
     const unsubscribe = onAuthStateChanged(
       auth,
       async (fbUser) => {
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
         if (!isMounted) return;
-
-        if (import.meta.env.DEV) {
-          console.log('Auth state changed');
-        }
 
         setFirebaseUser(fbUser);
 
         if (fbUser) {
+          setError(null); // Clear any existing auth error on successful auth state
           if (import.meta.env.DEV) {
-            console.log('Firebase UID available');
+            console.log('[Auth] Firebase user active:', fbUser.email);
           }
 
-          // Verify token retrieval for backend communication
+          // Sync profile to RTDB with a 4-second timeout so slow network won't stall UI
           try {
-            const token = await fbUser.getIdToken();
-            if (token && import.meta.env.DEV) {
-              console.log('Backend token verification successful');
-            }
-          } catch (tokErr) {
-            if (import.meta.env.DEV) {
-              console.warn('[Auth] Token retrieval notice:', tokErr);
-            }
-          }
-
-          if (import.meta.env.DEV) {
-            console.log('Profile synchronization started');
-          }
-
-          try {
-            const syncedProfile = await syncUserProfileToRTDB({
+            const syncPromise = syncUserProfileToRTDB({
               uid: fbUser.uid,
               displayName: fbUser.displayName,
               email: fbUser.email,
               photoURL: fbUser.photoURL,
             });
+            const rtdbTimeout = new Promise<null>((r) => setTimeout(() => r(null), 4000));
+            const syncedProfile = await Promise.race([syncPromise, rtdbTimeout]);
+
             if (isMounted) {
-              setUser(syncedProfile);
-              saveLocalUser(syncedProfile);
+              const finalProfile: UserProfile = syncedProfile || {
+                id: fbUser.uid,
+                email: fbUser.email || '',
+                full_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+                avatar_url: fbUser.photoURL || undefined,
+              };
+              setUser(finalProfile);
+              saveLocalUser(finalProfile);
             }
           } catch (syncErr) {
-            if (import.meta.env.DEV) {
-              console.warn('[Auth] Profile sync error, using fallback:', syncErr);
-            }
-            const fallbackProfile: UserProfile = {
-              id: fbUser.uid,
-              email: fbUser.email || '',
-              full_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
-              avatar_url: fbUser.photoURL || undefined,
-            };
             if (isMounted) {
+              const fallbackProfile: UserProfile = {
+                id: fbUser.uid,
+                email: fbUser.email || '',
+                full_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+                avatar_url: fbUser.photoURL || undefined,
+              };
               setUser(fallbackProfile);
               saveLocalUser(fallbackProfile);
             }
           } finally {
-            if (import.meta.env.DEV) {
-              console.log('Profile synchronization completed');
-            }
             if (isMounted) {
               setLoading(false);
+              isLoggingInRef.current = false;
             }
           }
         } else {
           if (isMounted) {
             const cachedUser = getLocalUser();
-            // If cached user is guest, preserve guest session; otherwise unauthenticated user = null
             if (cachedUser && cachedUser.id === 'guest') {
               setUser(cachedUser);
             } else {
               setUser(null);
             }
             setLoading(false);
+            isLoggingInRef.current = false;
           }
         }
       },
       (authErr) => {
         console.error('[Auth] onAuthStateChanged error:', authErr);
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
         if (isMounted) {
           setUser(null);
           setError('Unable to verify your session. Please check your connection.');
           setLoading(false);
+          isLoggingInRef.current = false;
         }
       }
     );
 
     return () => {
       isMounted = false;
-      clearTimeout(timeoutId);
+      if (timeoutId) clearTimeout(timeoutId);
       unsubscribe();
     };
   }, []);
@@ -174,17 +176,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [initAuth]);
 
   const loginWithGoogle = async () => {
+    if (isLoggingInRef.current) {
+      console.warn('[Auth] Login request already in progress, ignoring duplicate call.');
+      return;
+    }
+
+    isLoggingInRef.current = true;
     setLoading(true);
     setError(null);
+
     try {
       await signInWithGoogle();
-      // Firebase onAuthStateChanged listener will automatically receive the authenticated user,
-      // sync the user profile, update user state, and set loading = false.
+      // onAuthStateChanged listener will handle session sync and set loading = false
     } catch (err: any) {
       console.error('[Auth] Google Login error:', err);
       const friendlyMsg = formatAuthErrorMessage(err);
       setError(friendlyMsg);
       setLoading(false);
+      isLoggingInRef.current = false;
     }
   };
 
@@ -199,6 +208,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('[Auth] Logout error:', err);
     } finally {
       setLoading(false);
+      isLoggingInRef.current = false;
     }
   };
 
@@ -209,6 +219,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const clearError = () => setError(null);
 
   const retryAuth = () => {
+    isLoggingInRef.current = false;
     initAuth();
   };
 

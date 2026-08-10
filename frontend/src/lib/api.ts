@@ -1,7 +1,22 @@
 import { Conversation, Message, UserProfile } from '../types';
 import { getFirebaseIdToken } from './firebase';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || '';
+export function getApiBaseUrl(): string {
+  const envUrl = (import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || '').trim();
+  if (envUrl) {
+    const clean = envUrl.replace(/\/+$/, '');
+    // In production browsers, prevent accidental routing to localhost/127.0.0.1
+    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      if (clean.includes('localhost') || clean.includes('127.0.0.1')) {
+        return '';
+      }
+    }
+    return clean;
+  }
+  return '';
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
@@ -15,12 +30,13 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
 }
 
 export async function fetchHealthStatus() {
+  const baseUrl = getApiBaseUrl();
   try {
-    const res = await fetch(`${API_BASE_URL}/api/health`);
+    const res = await fetch(`${baseUrl}/api/health`);
     if (!res.ok) throw new Error('Health check failed');
     return await res.json();
   } catch (error) {
-    console.warn('Backend server connecting...', error);
+    console.warn('[API] Health check notice:', error);
     return { status: 'offline' };
   }
 }
@@ -33,6 +49,7 @@ export async function sendChatMessageStream({
   onToken,
   onComplete,
   onError,
+  signal,
 }: {
   conversationId: string;
   message: string;
@@ -41,10 +58,14 @@ export async function sendChatMessageStream({
   onToken: (token: string) => void;
   onComplete: (fullText: string, updatedTitle?: string) => void;
   onError: (error: string) => void;
+  signal?: AbortSignal;
 }) {
+  const baseUrl = getApiBaseUrl();
+  const endpoint = `${baseUrl}/api/chat`;
+
   try {
     const headers = await getAuthHeaders();
-    const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -53,61 +74,63 @@ export async function sendChatMessageStream({
         model,
         userId,
       }),
+      signal,
     });
 
     if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      const rawMsg = errData.message || '';
-      if (
-        !rawMsg ||
-        rawMsg.toLowerCase().includes('groq') ||
-        rawMsg.toLowerCase().includes('firebase admin') ||
-        rawMsg.toLowerCase().includes('supabase') ||
-        rawMsg.toLowerCase().includes('render') ||
-        rawMsg.toLowerCase().includes('500') ||
-        rawMsg.toLowerCase().includes('401')
-      ) {
-        throw new Error('Something went wrong. Please try again.');
+      let rawMsg = '';
+      try {
+        const errData = await response.json();
+        rawMsg = errData.message || errData.error || '';
+      } catch {
+        rawMsg = `Server returned status ${response.status}`;
       }
-      throw new Error(rawMsg);
+      console.error('[API] /api/chat error response:', response.status, rawMsg);
+      throw new Error(rawMsg || 'Failed to connect to backend service.');
     }
 
     if (!response.body) {
-      throw new Error('Something went wrong. Please try again.');
+      throw new Error('Response body is empty or readable stream not available.');
     }
 
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder('utf-8');
     let accumulatedText = '';
     let updatedTitle: string | undefined;
+    let lineBuffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split('\n');
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const dataStr = line.slice(6).trim();
-          if (dataStr === '[DONE]') {
-            break;
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+        const dataStr = trimmed.slice(6).trim();
+        if (dataStr === '[DONE]') {
+          break;
+        }
+
+        try {
+          const data = JSON.parse(dataStr);
+          if (data.token) {
+            accumulatedText += data.token;
+            onToken(data.token);
           }
-          try {
-            const data = JSON.parse(dataStr);
-            if (data.token) {
-              accumulatedText += data.token;
-              onToken(data.token);
-            }
-            if (data.title) {
-              updatedTitle = data.title;
-            }
-            if (data.error) {
-              onError('Something went wrong. Please try again.');
-              return;
-            }
-          } catch {
+          if (data.title) {
+            updatedTitle = data.title;
+          }
+          if (data.error) {
+            onError(data.error);
+            return;
+          }
+        } catch {
+          if (dataStr) {
             accumulatedText += dataStr;
             onToken(dataStr);
           }
@@ -115,28 +138,43 @@ export async function sendChatMessageStream({
       }
     }
 
+    if (lineBuffer.trim().startsWith('data: ')) {
+      const dataStr = lineBuffer.trim().slice(6).trim();
+      if (dataStr && dataStr !== '[DONE]') {
+        try {
+          const data = JSON.parse(dataStr);
+          if (data.token) {
+            accumulatedText += data.token;
+            onToken(data.token);
+          }
+          if (data.title) {
+            updatedTitle = data.title;
+          }
+        } catch {
+          accumulatedText += dataStr;
+          onToken(dataStr);
+        }
+      }
+    }
+
     onComplete(accumulatedText, updatedTitle);
   } catch (err: any) {
-    console.error('Chat stream error:', err);
+    console.error('[API] Chat stream error:', err);
     let msg = err.message || 'Something went wrong. Please try again.';
-    if (
-      msg.toLowerCase().includes('groq') ||
-      msg.toLowerCase().includes('firebase admin') ||
-      msg.toLowerCase().includes('supabase') ||
-      msg.toLowerCase().includes('render')
-    ) {
-      msg = 'Something went wrong. Please try again.';
+    if (msg === 'Failed to fetch') {
+      msg = 'Unable to reach backend server. Please check your network connection.';
     }
     onError(msg);
   }
 }
 
 export async function fetchConversations(userId?: string): Promise<Conversation[]> {
+  const baseUrl = getApiBaseUrl();
   try {
     const headers = await getAuthHeaders();
     const url = userId 
-      ? `${API_BASE_URL}/api/conversations?userId=${encodeURIComponent(userId)}`
-      : `${API_BASE_URL}/api/conversations`;
+      ? `${baseUrl}/api/conversations?userId=${encodeURIComponent(userId)}`
+      : `${baseUrl}/api/conversations`;
     const res = await fetch(url, { headers });
     if (!res.ok) throw new Error('Failed to fetch conversations');
     return await res.json();
@@ -147,9 +185,10 @@ export async function fetchConversations(userId?: string): Promise<Conversation[
 }
 
 export async function createConversation(title?: string, userId?: string): Promise<Conversation> {
+  const baseUrl = getApiBaseUrl();
   try {
     const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE_URL}/api/conversations`, {
+    const res = await fetch(`${baseUrl}/api/conversations`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ title, userId }),
@@ -169,9 +208,10 @@ export async function createConversation(title?: string, userId?: string): Promi
 }
 
 export async function fetchMessages(conversationId: string): Promise<Message[]> {
+  const baseUrl = getApiBaseUrl();
   try {
     const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages`, { headers });
+    const res = await fetch(`${baseUrl}/api/conversations/${conversationId}/messages`, { headers });
     if (!res.ok) throw new Error('Failed to fetch messages');
     return await res.json();
   } catch (err) {
@@ -181,9 +221,10 @@ export async function fetchMessages(conversationId: string): Promise<Message[]> 
 }
 
 export async function deleteConversationApi(conversationId: string): Promise<boolean> {
+  const baseUrl = getApiBaseUrl();
   try {
     const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
+    const res = await fetch(`${baseUrl}/api/conversations/${conversationId}`, {
       method: 'DELETE',
       headers,
     });
@@ -195,9 +236,10 @@ export async function deleteConversationApi(conversationId: string): Promise<boo
 }
 
 export async function updateConversationTitleApi(conversationId: string, title: string): Promise<boolean> {
+  const baseUrl = getApiBaseUrl();
   try {
     const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
+    const res = await fetch(`${baseUrl}/api/conversations/${conversationId}`, {
       method: 'PATCH',
       headers,
       body: JSON.stringify({ title }),
@@ -229,8 +271,9 @@ export function getAdminHeaders(): Record<string, string> {
 }
 
 export async function adminLogin(password: string): Promise<{ success: boolean; token?: string; error?: string }> {
+  const baseUrl = getApiBaseUrl();
   try {
-    const res = await fetch(`${API_BASE_URL}/api/admin/login`, {
+    const res = await fetch(`${baseUrl}/api/admin/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -255,8 +298,9 @@ export async function adminLogin(password: string): Promise<{ success: boolean; 
 }
 
 export async function checkAdminSession(): Promise<boolean> {
+  const baseUrl = getApiBaseUrl();
   try {
-    const res = await fetch(`${API_BASE_URL}/api/admin/session`, {
+    const res = await fetch(`${baseUrl}/api/admin/session`, {
       headers: getAdminHeaders(),
       credentials: 'include',
     });
@@ -267,8 +311,9 @@ export async function checkAdminSession(): Promise<boolean> {
 }
 
 export async function adminLogout(): Promise<boolean> {
+  const baseUrl = getApiBaseUrl();
   try {
-    await fetch(`${API_BASE_URL}/api/admin/logout`, {
+    await fetch(`${baseUrl}/api/admin/logout`, {
       method: 'POST',
       headers: getAdminHeaders(),
       credentials: 'include',
@@ -282,8 +327,9 @@ export async function adminLogout(): Promise<boolean> {
 }
 
 export async function getAdminSystemPrompt(): Promise<string> {
+  const baseUrl = getApiBaseUrl();
   try {
-    const res = await fetch(`${API_BASE_URL}/api/admin/system-prompt`, {
+    const res = await fetch(`${baseUrl}/api/admin/system-prompt`, {
       headers: getAdminHeaders(),
       credentials: 'include',
     });
@@ -296,8 +342,9 @@ export async function getAdminSystemPrompt(): Promise<string> {
 }
 
 export async function updateAdminSystemPrompt(systemPrompt: string): Promise<boolean> {
+  const baseUrl = getApiBaseUrl();
   try {
-    const res = await fetch(`${API_BASE_URL}/api/admin/system-prompt`, {
+    const res = await fetch(`${baseUrl}/api/admin/system-prompt`, {
       method: 'PUT',
       headers: getAdminHeaders(),
       credentials: 'include',
@@ -315,8 +362,9 @@ export async function getAdminSystemStatus(): Promise<{
   databaseConnected: boolean;
   activeAdminSessionsCount: number;
 }> {
+  const baseUrl = getApiBaseUrl();
   try {
-    const res = await fetch(`${API_BASE_URL}/api/admin/system-status`, {
+    const res = await fetch(`${baseUrl}/api/admin/system-status`, {
       headers: getAdminHeaders(),
       credentials: 'include',
     });
