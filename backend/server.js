@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
+const crypto = require('crypto');
 const Groq = require('groq-sdk');
 const admin = require('firebase-admin');
 
@@ -10,6 +11,98 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+// Admin Session Store
+const activeAdminSessions = new Map();
+
+// Rate Limiter for Admin Login
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { message: 'Too many admin login attempts. Please try again later.' },
+});
+
+// Admin System Prompt Management
+const DEFAULT_SYSTEM_PROMPT =
+  'You are Flow AI, an intelligent, helpful, highly capable AI assistant. Give articulate, clear, well-structured answers using clean markdown formatting.';
+
+let cachedSystemPrompt = DEFAULT_SYSTEM_PROMPT;
+
+async function getSystemPrompt() {
+  if (admin.apps.length > 0) {
+    try {
+      const db = admin.database();
+      const snapshot = await db.ref('systemConfig/systemPrompt').get();
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        if (typeof val === 'string' && val.trim().length > 0) {
+          cachedSystemPrompt = val;
+          return val;
+        }
+      }
+    } catch (e) {
+      // Fall back to cached
+    }
+  }
+  return cachedSystemPrompt;
+}
+
+async function setSystemPrompt(prompt) {
+  cachedSystemPrompt = prompt;
+  if (admin.apps.length > 0) {
+    try {
+      const db = admin.database();
+      await db.ref('systemConfig/systemPrompt').set(prompt);
+      console.log('[Flow AI Admin] System prompt persisted to Realtime Database.');
+      return true;
+    } catch (e) {
+      console.warn('[Flow AI Admin] Realtime Database save notice:', e.message);
+    }
+  }
+  return true;
+}
+
+function verifyAdminPassword(inputPass) {
+  const envPass = process.env.ADMIN_PASSWORD || 'admin123';
+  if (!inputPass || typeof inputPass !== 'string') return false;
+
+  try {
+    const a = Buffer.from(inputPass);
+    const b = Buffer.from(envPass);
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+function authenticateAdminSession(req, res, next) {
+  const cookieHeader = req.headers.cookie;
+  let tokenFromCookie;
+  if (cookieHeader) {
+    const match = cookieHeader.split(';').find((c) => c.trim().startsWith('flow_admin_session='));
+    if (match) {
+      tokenFromCookie = match.split('=')[1]?.trim();
+    }
+  }
+
+  const authHeader = req.headers.authorization || req.headers['x-admin-token'];
+  const token =
+    tokenFromCookie ||
+    (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : undefined);
+
+  if (!token || !activeAdminSessions.has(token)) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const session = activeAdminSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) {
+    activeAdminSessions.delete(token || '');
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  next();
+}
 
 // ============================================================================
 // 1. FIREBASE ADMIN INITIALIZATION
@@ -308,20 +401,24 @@ app.post('/api/chat', chatLimiter, authenticateFirebaseUser, async (req, res) =>
   let fullAiResponse = '';
 
   try {
+    const activePrompt = await getSystemPrompt();
+
     if (groqClient) {
-      const groqMessages = existingMsgs.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      const filteredHistory = existingMsgs
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
 
       const stream = await groqClient.chat.completions.create({
         model: groqModel,
         messages: [
           {
             role: 'system',
-            content: 'You are Flow AI, an intelligent, helpful, highly capable AI assistant. Give articulate, clear, well-structured answers using clean markdown formatting.',
+            content: activePrompt,
           },
-          ...groqMessages,
+          ...filteredHistory,
         ],
         stream: true,
         temperature: 0.7,
@@ -381,7 +478,120 @@ How would you like to proceed?`;
 }
 
 // ============================================================================
-// 9. START SERVER
+// 9. ADMIN PANEL ENDPOINTS
+// ============================================================================
+app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
+  const { password } = req.body || {};
+
+  if (!password || !verifyAdminPassword(password)) {
+    return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+  }
+
+  const sessionToken = 'admin-sess-' + crypto.randomBytes(24).toString('hex');
+  const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
+
+  activeAdminSessions.set(sessionToken, { token: sessionToken, createdAt: Date.now(), expiresAt });
+
+  res.cookie('flow_admin_session', sessionToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 8 * 60 * 60 * 1000,
+  });
+
+  res.json({ success: true, token: sessionToken, message: 'Admin authenticated successfully' });
+});
+
+app.get('/api/admin/session', (req, res) => {
+  const cookieHeader = req.headers.cookie;
+  let tokenFromCookie;
+  if (cookieHeader) {
+    const match = cookieHeader.split(';').find((c) => c.trim().startsWith('flow_admin_session='));
+    if (match) {
+      tokenFromCookie = match.split('=')[1]?.trim();
+    }
+  }
+
+  const authHeader = req.headers.authorization || req.headers['x-admin-token'];
+  const token =
+    tokenFromCookie ||
+    (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : undefined);
+
+  if (!token || !activeAdminSessions.has(token)) {
+    return res.status(401).json({ authenticated: false });
+  }
+
+  const session = activeAdminSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) {
+    activeAdminSessions.delete(token || '');
+    return res.status(401).json({ authenticated: false });
+  }
+
+  res.json({ authenticated: true, expiresAt: session.expiresAt });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  const cookieHeader = req.headers.cookie;
+  let tokenFromCookie;
+  if (cookieHeader) {
+    const match = cookieHeader.split(';').find((c) => c.trim().startsWith('flow_admin_session='));
+    if (match) {
+      tokenFromCookie = match.split('=')[1]?.trim();
+    }
+  }
+
+  const authHeader = req.headers.authorization || req.headers['x-admin-token'];
+  const token =
+    tokenFromCookie ||
+    (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : undefined);
+
+  if (token) {
+    activeAdminSessions.delete(token);
+  }
+
+  res.clearCookie('flow_admin_session');
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+app.get('/api/admin/system-prompt', authenticateAdminSession, async (req, res) => {
+  try {
+    const prompt = await getSystemPrompt();
+    res.json({ systemPrompt: prompt });
+  } catch {
+    res.status(500).json({ message: 'Failed to retrieve system prompt' });
+  }
+});
+
+app.put('/api/admin/system-prompt', authenticateAdminSession, async (req, res) => {
+  const { systemPrompt } = req.body || {};
+  if (!systemPrompt || typeof systemPrompt !== 'string') {
+    return res.status(400).json({ message: 'System prompt must be a non-empty string' });
+  }
+
+  try {
+    await setSystemPrompt(systemPrompt);
+    res.json({ success: true, message: 'System prompt updated successfully', systemPrompt });
+  } catch {
+    res.status(500).json({ message: 'Failed to update system prompt' });
+  }
+});
+
+app.get('/api/admin/system-status', authenticateAdminSession, async (req, res) => {
+  try {
+    const currentPrompt = await getSystemPrompt();
+    res.json({
+      aiEngine: groqClient ? 'Groq Llama-3.3-70b Online' : 'Simulated AI Pipeline',
+      systemPromptLength: currentPrompt.length,
+      databaseConnected: admin.apps.length > 0,
+      activeAdminSessionsCount: activeAdminSessions.size,
+    });
+  } catch {
+    res.status(500).json({ message: 'Failed to retrieve system status' });
+  }
+});
+
+// ============================================================================
+// 10. START SERVER
 // ============================================================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Flow AI Backend] Server running on port ${PORT}`);

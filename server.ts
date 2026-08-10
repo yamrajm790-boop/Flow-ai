@@ -4,15 +4,114 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import Groq from 'groq-sdk';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getDatabase } from 'firebase-admin/database';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Admin Session Store
+interface AdminSession {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+}
+const activeAdminSessions = new Map<string, AdminSession>();
+
+// Rate Limiter for Admin Login
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 attempts per 15 minutes
+  message: { message: 'Too many admin login attempts. Please try again later.' },
+});
+
+// Admin System Prompt Management
+const DEFAULT_SYSTEM_PROMPT =
+  'You are Flow AI, an intelligent, helpful, highly capable AI assistant. Give articulate, clear, well-structured answers using clean markdown formatting.';
+
+let cachedSystemPrompt = DEFAULT_SYSTEM_PROMPT;
+
+async function getSystemPrompt(): Promise<string> {
+  if (getApps().length > 0) {
+    try {
+      const db = getDatabase();
+      const snapshot = await db.ref('systemConfig/systemPrompt').get();
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        if (typeof val === 'string' && val.trim().length > 0) {
+          cachedSystemPrompt = val;
+          return val;
+        }
+      }
+    } catch (e) {
+      // Return cached in-memory fallback
+    }
+  }
+  return cachedSystemPrompt;
+}
+
+async function setSystemPrompt(prompt: string): Promise<boolean> {
+  cachedSystemPrompt = prompt;
+  if (getApps().length > 0) {
+    try {
+      const db = getDatabase();
+      await db.ref('systemConfig/systemPrompt').set(prompt);
+      console.log('[Flow AI Admin] System prompt persisted to Realtime Database.');
+      return true;
+    } catch (e) {
+      console.warn('[Flow AI Admin] Realtime Database save notice:', e);
+    }
+  }
+  return true;
+}
+
+function verifyAdminPassword(inputPass: string): boolean {
+  const envPass = process.env.ADMIN_PASSWORD || 'admin123';
+  if (!inputPass || typeof inputPass !== 'string') return false;
+
+  try {
+    const a = Buffer.from(inputPass);
+    const b = Buffer.from(envPass);
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+function authenticateAdminSession(req: Request, res: Response, next: Function) {
+  const cookieHeader = req.headers.cookie;
+  let tokenFromCookie: string | undefined;
+  if (cookieHeader) {
+    const match = cookieHeader.split(';').find((c) => c.trim().startsWith('flow_admin_session='));
+    if (match) {
+      tokenFromCookie = match.split('=')[1]?.trim();
+    }
+  }
+
+  const authHeader = req.headers.authorization || (req.headers['x-admin-token'] as string);
+  const token =
+    tokenFromCookie ||
+    (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : undefined);
+
+  if (!token || !activeAdminSessions.has(token)) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const session = activeAdminSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) {
+    activeAdminSessions.delete(token || '');
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  next();
+}
 
 // Helper to clean and parse Firebase Private Key / Credentials from Environment
 function parseFirebaseCredentials() {
@@ -223,15 +322,95 @@ function generateTitleFromMessage(userMsg: string): string {
 const handleHealthCheck = (req: Request, res: Response) => {
   res.json({
     status: 'ok',
-    groqConfigured: Boolean(groqClient),
-    firebaseConfigured: Boolean(getApps().length > 0),
-    model: 'Flow AI', // Friendly label, NEVER expose internal model ID
     timestamp: new Date().toISOString(),
   });
 };
 
 app.get('/api/health', handleHealthCheck);
 app.get('/health', handleHealthCheck);
+
+// ============================================================================
+// ADMIN API ENDPOINTS
+// ============================================================================
+
+// Admin Login
+app.post('/api/admin/login', adminLoginLimiter, (req: Request, res: Response) => {
+  const { password } = req.body;
+  if (!password || !verifyAdminPassword(password)) {
+    console.warn('[Flow AI Admin] Failed admin login attempt.');
+    return res.status(401).json({ message: 'Invalid admin credentials' });
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+  activeAdminSessions.set(token, { token, createdAt: Date.now(), expiresAt });
+
+  console.log('[Flow AI Admin] Admin authenticated successfully.');
+
+  // Set HttpOnly Cookie
+  res.cookie('flow_admin_session', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000,
+  });
+
+  return res.json({ success: true, token });
+});
+
+// Admin Session Verification
+app.get('/api/admin/session', authenticateAdminSession, (req: Request, res: Response) => {
+  return res.json({ authenticated: true });
+});
+
+// Admin Logout
+app.post('/api/admin/logout', (req: Request, res: Response) => {
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    const match = cookieHeader.split(';').find((c) => c.trim().startsWith('flow_admin_session='));
+    if (match) {
+      const token = match.split('=')[1]?.trim();
+      if (token) activeAdminSessions.delete(token);
+    }
+  }
+  const authHeader = req.headers.authorization || (req.headers['x-admin-token'] as string);
+  if (typeof authHeader === 'string') {
+    const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (token) activeAdminSessions.delete(token);
+  }
+
+  res.clearCookie('flow_admin_session');
+  return res.json({ success: true });
+});
+
+// Get System Prompt (Admin Only)
+app.get('/api/admin/system-prompt', authenticateAdminSession, async (req: Request, res: Response) => {
+  const prompt = await getSystemPrompt();
+  return res.json({ systemPrompt: prompt });
+});
+
+// Update System Prompt (Admin Only)
+app.put('/api/admin/system-prompt', authenticateAdminSession, async (req: Request, res: Response) => {
+  const { systemPrompt } = req.body;
+  if (typeof systemPrompt !== 'string' || !systemPrompt.trim()) {
+    return res.status(400).json({ message: 'System prompt content cannot be empty.' });
+  }
+
+  await setSystemPrompt(systemPrompt.trim());
+  return res.json({ success: true, systemPrompt: cachedSystemPrompt });
+});
+
+// Get System Status (Admin Only)
+app.get('/api/admin/system-status', authenticateAdminSession, async (req: Request, res: Response) => {
+  const prompt = await getSystemPrompt();
+  return res.json({
+    aiEngine: groqClient ? 'Online (Groq)' : 'Active (Preview Stream Engine)',
+    systemPromptLength: prompt.length,
+    databaseConnected: getApps().length > 0,
+    activeAdminSessionsCount: activeAdminSessions.size,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // 2. Get Conversations
 app.get('/api/conversations', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
@@ -351,22 +530,25 @@ app.post('/api/chat', chatLimiter, authenticateFirebaseUser, async (req: Authent
   let fullAiResponse = '';
 
   try {
+    const activePrompt = await getSystemPrompt();
+
     if (groqClient) {
-      // Stream directly from Groq API
-      const groqMessages = existingMsgs.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      // Stream directly from Groq API with server-enforced system prompt
+      const filteredHistory = existingMsgs
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
 
       const stream = await groqClient.chat.completions.create({
         model: groqModel,
         messages: [
           {
             role: 'system',
-            content:
-              'You are Flow AI, an intelligent, helpful, highly capable AI assistant. Give articulate, clear, well-structured answers using clean markdown formatting.',
+            content: activePrompt,
           },
-          ...groqMessages,
+          ...filteredHistory,
         ],
         stream: true,
         temperature: 0.7,
@@ -407,8 +589,8 @@ app.post('/api/chat', chatLimiter, authenticateFirebaseUser, async (req: Authent
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error: any) {
-    console.error('[Flow AI Backend] Groq API Stream Error:', error);
-    res.write(`data: ${JSON.stringify({ error: error.message || 'Error generating AI response' })}\n\n`);
+    console.error('[Flow AI Backend] AI Stream Error:', error);
+    res.write(`data: ${JSON.stringify({ error: 'Something went wrong. Please try again.' })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
   }

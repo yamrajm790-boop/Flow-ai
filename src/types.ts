@@ -46,8 +46,5 @@ export interface ModelOption {
 
 export interface HealthStatus {
   status: string;
-  groqConfigured: boolean;
-  supabaseConfigured: boolean;
-  model: string;
-  timestamp: string;
+  timestamp?: string;
 }

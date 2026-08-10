@@ -374,7 +374,7 @@ function MainApp() {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-[#0D0D0D] text-white">
         <div className="flex flex-col items-center gap-4 text-center px-4">
-          <FlowLogo className="w-12 h-12 animate-pulse" />
+          <FlowLogo className="w-12 h-12" isRotating={true} />
           <span className="text-sm font-medium text-neutral-400">Loading Flow AI Workspace...</span>
         </div>
       </div>
@@ -597,7 +597,30 @@ function MainApp() {
   );
 }
 
+import { AdminPanel } from './components/AdminPanel';
+
 export default function App() {
+  const [currentPath, setCurrentPath] = useState(() => window.location.pathname);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setCurrentPath(window.location.pathname);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  if (currentPath === '/admin' || currentPath.startsWith('/admin/')) {
+    return (
+      <AdminPanel
+        onReturnToApp={() => {
+          window.history.pushState({}, '', '/');
+          setCurrentPath('/');
+        }}
+      />
+    );
+  }
+
   return (
     <AuthProvider>
       <MainApp />

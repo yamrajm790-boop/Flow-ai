@@ -21,7 +21,7 @@ export async function fetchHealthStatus() {
     return await res.json();
   } catch (error) {
     console.warn('Backend server connecting...', error);
-    return { status: 'offline', groqConfigured: false, firebaseConfigured: false };
+    return { status: 'offline' };
   }
 }
 
@@ -57,11 +57,23 @@ export async function sendChatMessageStream({
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.message || `Server error (${response.status})`);
+      const rawMsg = errData.message || '';
+      if (
+        !rawMsg ||
+        rawMsg.toLowerCase().includes('groq') ||
+        rawMsg.toLowerCase().includes('firebase admin') ||
+        rawMsg.toLowerCase().includes('supabase') ||
+        rawMsg.toLowerCase().includes('render') ||
+        rawMsg.toLowerCase().includes('500') ||
+        rawMsg.toLowerCase().includes('401')
+      ) {
+        throw new Error('Something went wrong. Please try again.');
+      }
+      throw new Error(rawMsg);
     }
 
     if (!response.body) {
-      throw new Error('No response body stream received');
+      throw new Error('Something went wrong. Please try again.');
     }
 
     const reader = response.body.getReader();
@@ -92,7 +104,7 @@ export async function sendChatMessageStream({
               updatedTitle = data.title;
             }
             if (data.error) {
-              onError(data.error);
+              onError('Something went wrong. Please try again.');
               return;
             }
           } catch {
@@ -106,7 +118,16 @@ export async function sendChatMessageStream({
     onComplete(accumulatedText, updatedTitle);
   } catch (err: any) {
     console.error('Chat stream error:', err);
-    onError(err.message || 'Failed to stream response from Flow AI');
+    let msg = err.message || 'Something went wrong. Please try again.';
+    if (
+      msg.toLowerCase().includes('groq') ||
+      msg.toLowerCase().includes('firebase admin') ||
+      msg.toLowerCase().includes('supabase') ||
+      msg.toLowerCase().includes('render')
+    ) {
+      msg = 'Something went wrong. Please try again.';
+    }
+    onError(msg);
   }
 }
 
@@ -185,5 +206,128 @@ export async function updateConversationTitleApi(conversationId: string, title: 
   } catch (err) {
     console.warn('API updateConversationTitle error:', err);
     return false;
+  }
+}
+
+// ============================================================================
+// ADMIN CLIENT API HELPERS
+// ============================================================================
+
+let adminTokenInMemory: string | null = null;
+
+export function setAdminTokenInMemory(token: string | null) {
+  adminTokenInMemory = token;
+}
+
+export function getAdminHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (adminTokenInMemory) {
+    headers['X-Admin-Token'] = adminTokenInMemory;
+    headers['Authorization'] = `Bearer ${adminTokenInMemory}`;
+  }
+  return headers;
+}
+
+export async function adminLogin(password: string): Promise<{ success: boolean; token?: string; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ password }),
+    });
+
+    if (!res.ok) {
+      if (res.status === 429) {
+        return { success: false, error: 'Too many login attempts. Please try again later.' };
+      }
+      return { success: false, error: 'Invalid admin credentials.' };
+    }
+
+    const data = await res.json();
+    if (data.token) {
+      setAdminTokenInMemory(data.token);
+    }
+    return { success: true, token: data.token };
+  } catch {
+    return { success: false, error: 'Unable to connect to authentication service.' };
+  }
+}
+
+export async function checkAdminSession(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/admin/session`, {
+      headers: getAdminHeaders(),
+      credentials: 'include',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function adminLogout(): Promise<boolean> {
+  try {
+    await fetch(`${API_BASE_URL}/api/admin/logout`, {
+      method: 'POST',
+      headers: getAdminHeaders(),
+      credentials: 'include',
+    });
+    setAdminTokenInMemory(null);
+    return true;
+  } catch {
+    setAdminTokenInMemory(null);
+    return false;
+  }
+}
+
+export async function getAdminSystemPrompt(): Promise<string> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/admin/system-prompt`, {
+      headers: getAdminHeaders(),
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error('Failed to load system prompt');
+    const data = await res.json();
+    return data.systemPrompt || '';
+  } catch {
+    throw new Error('Unable to load system prompt.');
+  }
+}
+
+export async function updateAdminSystemPrompt(systemPrompt: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/admin/system-prompt`, {
+      method: 'PUT',
+      headers: getAdminHeaders(),
+      credentials: 'include',
+      body: JSON.stringify({ systemPrompt }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function getAdminSystemStatus(): Promise<{
+  aiEngine: string;
+  systemPromptLength: number;
+  databaseConnected: boolean;
+  activeAdminSessionsCount: number;
+}> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/admin/system-status`, {
+      headers: getAdminHeaders(),
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error('Failed to load status');
+    return await res.json();
+  } catch {
+    return {
+      aiEngine: 'Offline',
+      systemPromptLength: 0,
+      databaseConnected: false,
+      activeAdminSessionsCount: 0,
+    };
   }
 }

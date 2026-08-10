@@ -36,7 +36,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({ isOpen, onClose }) =
             <Zap className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
             <div>
               <div className="font-semibold text-white">Ultra-Fast Reasoning Stream</div>
-              <p className="text-neutral-400 text-xs mt-0.5">Sub-second response tokens powered by Groq Llama-3.3 hardware acceleration.</p>
+              <p className="text-neutral-400 text-xs mt-0.5">Sub-second response tokens powered by high-speed neural hardware acceleration.</p>
             </div>
           </div>
 

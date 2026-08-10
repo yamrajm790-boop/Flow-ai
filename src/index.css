@@ -1,1 +1,31 @@
 @import "tailwindcss";
+
+@keyframes gentle-logo-rotate {
+  0% {
+    transform: rotate(0deg) scale(1.18);
+    -webkit-transform: rotate(0deg) scale(1.18);
+  }
+  100% {
+    transform: rotate(360deg) scale(1.18);
+    -webkit-transform: rotate(360deg) scale(1.18);
+  }
+}
+
+.animate-flow-rotate {
+  animation: gentle-logo-rotate 1.8s linear infinite;
+  -webkit-animation: gentle-logo-rotate 1.8s linear infinite;
+  transform-origin: 50% 50%;
+  -webkit-transform-origin: 50% 50%;
+  will-change: transform;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-flow-rotate {
+    animation: none;
+    -webkit-animation: none;
+    transform: scale(1.18);
+    -webkit-transform: scale(1.18);
+  }
+}
