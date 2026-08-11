@@ -29,6 +29,7 @@ import {
   updateAdminSystemPrompt,
   getAdminSystemStatus,
   getApiBaseUrl,
+  getAuthHeaders,
 } from '../lib/api';
 
 interface AdminPanelProps {
@@ -162,14 +163,32 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onReturnToApp }) => {
 
     try {
       const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
       const response = await fetch(`${baseUrl}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: testMessage, conversationId: 'admin-test-sandbox' }),
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({
+          message: testMessage,
+          conversationId: 'admin-test-sandbox',
+          userId: 'admin-tester',
+        }),
       });
 
-      if (!response.ok || !response.body) {
-        setTestResponse('Sandbox test failed: Server error.');
+      if (!response.ok) {
+        let errDetail = `Server returned status ${response.status}`;
+        try {
+          const errData = await response.json();
+          errDetail = errData.message || errData.error || errDetail;
+        } catch {
+          // ignore json parse error
+        }
+        setTestResponse(`Sandbox test failed: ${errDetail}`);
+        return;
+      }
+
+      if (!response.body) {
+        setTestResponse('Sandbox test failed: Empty response body.');
         return;
       }
 

@@ -4,6 +4,8 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 const Groq = require('groq-sdk');
 const admin = require('firebase-admin');
 
@@ -23,6 +25,7 @@ const adminLoginLimiter = rateLimit({
 });
 
 // Admin System Prompt Management
+const SYSTEM_PROMPT_PATH = 'systemConfig/systemPrompt';
 const DEFAULT_SYSTEM_PROMPT =
   'You are Flow AI, an intelligent, helpful, highly capable AI assistant. Give articulate, clear, well-structured answers using clean markdown formatting.';
 
@@ -32,31 +35,32 @@ async function getSystemPrompt() {
   if (admin.apps.length > 0) {
     try {
       const db = admin.database();
-      const snapshot = await db.ref('systemConfig/systemPrompt').get();
+      const snapshot = await db.ref(SYSTEM_PROMPT_PATH).get();
       if (snapshot.exists()) {
         const val = snapshot.val();
         if (typeof val === 'string' && val.trim().length > 0) {
-          cachedSystemPrompt = val;
-          return val;
+          cachedSystemPrompt = val.trim();
+          return cachedSystemPrompt;
         }
       }
     } catch (e) {
-      // Fall back to cached
+      console.warn('[AI] Error fetching system prompt from Firebase RTDB:', e.message || e);
     }
   }
   return cachedSystemPrompt;
 }
 
 async function setSystemPrompt(prompt) {
-  cachedSystemPrompt = prompt;
+  const cleanPrompt = prompt.trim();
+  cachedSystemPrompt = cleanPrompt;
   if (admin.apps.length > 0) {
     try {
       const db = admin.database();
-      await db.ref('systemConfig/systemPrompt').set(prompt);
-      console.log('[Flow AI Admin] System prompt persisted to Realtime Database.');
+      await db.ref(SYSTEM_PROMPT_PATH).set(cleanPrompt);
+      console.log(`[Flow AI Admin] System prompt persisted to Realtime Database at path: ${SYSTEM_PROMPT_PATH}`);
       return true;
     } catch (e) {
-      console.warn('[Flow AI Admin] Realtime Database save notice:', e.message);
+      console.warn('[Flow AI Admin] Realtime Database save notice:', e.message || e);
     }
   }
   return true;
@@ -158,7 +162,25 @@ function parseFirebaseCredentials() {
 }
 
 const { projectId: firebaseProjectId, clientEmail: firebaseClientEmail, privateKey: firebasePrivateKey } = parseFirebaseCredentials();
-const firebaseDatabaseUrl = process.env.FIREBASE_DATABASE_URL;
+
+let defaultDbUrl = `https://${firebaseProjectId}-default-rtdb.firebaseio.com`;
+try {
+  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed.databaseURL) {
+      defaultDbUrl = parsed.databaseURL;
+    }
+  }
+} catch {
+  // Ignore fallback error
+}
+
+const firebaseDatabaseUrl =
+  process.env.FIREBASE_DATABASE_URL ||
+  process.env.VITE_FIREBASE_DATABASE_URL ||
+  defaultDbUrl;
 
 if (admin.apps.length === 0) {
   try {
@@ -438,6 +460,10 @@ app.post('/api/chat', chatLimiter, authenticateFirebaseUser, async (req, res) =>
 
   try {
     const activePrompt = await getSystemPrompt();
+
+    console.log(`[AI] Firebase system prompt loaded: ${Boolean(activePrompt)}`);
+    console.log(`[AI] System prompt length: ${activePrompt ? activePrompt.length : 0}`);
+    console.log(`[AI] AI request prepared with system instructions: true`);
 
     if (groqClient) {
       const filteredHistory = existingMsgs
